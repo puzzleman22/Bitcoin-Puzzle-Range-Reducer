@@ -42,7 +42,7 @@ the last 2 params, are block x threads
 
 so running:
 
-`main.exe 13 105b7f253f0ebd7843adaebbd805c944bfb863e4 256 256`
+`main.exe 13 105b7f253f0ebd7843adaebbd805c944bfb863e4 512 512`
 
 will be much more powerful
 
