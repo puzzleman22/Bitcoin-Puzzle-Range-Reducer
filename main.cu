@@ -551,11 +551,9 @@ int main(int argc, char** argv) {
 	
     // Seed the random number generator
     srand((unsigned)time(NULL));
-    
-    CHECK_CUDA(cudaSetDevice(0));
-    
+
     cudaDeviceProp prop;
-    CHECK_CUDA(cudaGetDeviceProperties(&prop, 0));
+    CHECK_CUDA(cudaGetDeviceProperties(&prop, device_id));
     printf("Using GPU: %s\n", prop.name);
     printf("Compute capability: %d.%d\n", prop.major, prop.minor);
     printf("Multiprocessors: %d\n", prop.multiProcessorCount);
