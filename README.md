@@ -2,7 +2,7 @@
 
 <img src="https://raw.githubusercontent.com/puzzleman22/Bitcoin-Puzzle-Range-Reducer/refs/heads/main/BPRD.png" />
 
-## what its about?
+## What its about?
 
 this program gets any range that starts with 1, for example puzzle 21
 
@@ -27,5 +27,14 @@ this way you only need to randomize a less amount of hex chars to hit the target
 ## How to use
 
 `main.exe 0 29a78213caa9eea824acf08022ab9dfc83414f56` - puzzle 21
+
 `main.exe 1 2f396b29b27324300d0c59b17c3abc1835bd3dbb` - puzzle 25
+
 `main.exe 13 105b7f253f0ebd7843adaebbd805c944bfb863e4` - puzzle 73
+
+# for questions and other things
+Author Telegram: **https://t.me/nmn5436**
+
+if you liked this idea or found something, my BTC address for donations:
+**bc1p6fmhpep0wkqkzvw86fg0afz85fyw692vmcg05460yuqstva7qscs2d9xhk**
+
