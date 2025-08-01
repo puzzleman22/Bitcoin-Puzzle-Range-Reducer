@@ -513,9 +513,10 @@ void print_usage(const char* program_name) {
 }
 
 void generate_random_prefix(char* prefix, int length) {
-    const char hex_chars[] = "0123456789abcdef";
     for (int i = 0; i < length; i++) {
-        prefix[i] = hex_chars[rand() % 16];
+        // Get only 4 bits per digit: combine multiple rand() calls if needed
+        int hex_digit = rand() & 0xF;  // only use the low 4 bits
+        prefix[i] = "0123456789abcdef"[hex_digit];
     }
     prefix[length] = '\0';
 }
@@ -526,12 +527,27 @@ int main(int argc, char** argv) {
         return 1;
     }
     
-    int device_count;
+	
+	int device_id = (argc >= 6) ? std::stoi(argv[5]) : 0;
+
+	// Check if device exists
+	int device_count = 0;
+	
     CHECK_CUDA(cudaGetDeviceCount(&device_count));
     if (device_count == 0) {
         fprintf(stderr, "No CUDA devices found!\n");
         return 1;
     }
+	if (device_id < 0 || device_id >= device_count) {
+		std::cerr << "Invalid device ID: " << device_id
+				  << ". Available devices: 0 to " << (device_count - 1) << std::endl;
+		return 1;
+	}
+	// Set device
+	cudaSetDevice(device_id);
+
+	std::cout << "Using CUDA device " << device_id << std::endl;
+	
 	
     // Seed the random number generator
     srand((unsigned)time(NULL));
@@ -553,7 +569,7 @@ int main(int argc, char** argv) {
 	int chars = (argc >= 1) ? std::stoi(argv[1]) : 13;
     int blocks = (argc >= 4) ? std::stoi(argv[3]) : 32;
     int threads = (argc >= 5) ? std::stoi(argv[4]) : 32;
-	int mode = (argc >= 6) ? std::stoi(argv[5]) : 0;
+	int mode = (argc >= 7) ? std::stoi(argv[6]) : 0;
     // Parse target hash160
     uint8_t target_hash[20];
     if (!parse_hex_string(argv[2], target_hash, 20)) {
