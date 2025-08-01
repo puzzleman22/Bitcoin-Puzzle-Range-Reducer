@@ -36,6 +36,16 @@ this way you only need to randomize a less amount of hex chars to hit the target
 
 `main.exe 13 105b7f253f0ebd7843adaebbd805c944bfb863e4` - puzzle 73
 
+# oh and by the way
+
+the last 2 params, are block x threads
+
+so running:
+
+`main.exe 13 105b7f253f0ebd7843adaebbd805c944bfb863e4 256 256`
+
+will be much more powerful
+
 # for questions and other things
 Author Telegram: **https://t.me/nmn5436**
 
