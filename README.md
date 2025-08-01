@@ -4,7 +4,11 @@
 
 ## What its about?
 
-this program gets any range that starts with 1, for example puzzle 21
+this program scans last 5 hex chars of any range, the rest is randomized
+
+### WHY EXACTLY 5 hex chars? because the GPU scans it in an instant, so why not use this advantage?
+
+scanning 6 hex chars is already too long, but scanning 5 hex chars is exactly whats needed
 
 1 prefix + 5 hex chars
 
