@@ -13,6 +13,15 @@
 #define THREADS_PER_BLOCK 256
 #define CHECK_INTERVAL 2000
 
+#define CHECK_CUDA(call) do { \
+    cudaError_t err = call; \
+    if (err != cudaSuccess) { \
+        fprintf(stderr, "CUDA error in %s at line %d: %s\n", __FILE__, __LINE__, cudaGetErrorString(err)); \
+        exit(EXIT_FAILURE); \
+    } \
+} while(0)
+
+
 // Global device memory for results
 __device__ volatile int g_found = 0;
 __device__ char g_found_hex[65] = {0};
