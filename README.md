@@ -28,6 +28,11 @@ so for puzzle 73 it will be
 
 this way you only need to randomize a less amount of hex chars to hit the target
 
+### note
+
+Bitcoin Puzzle GPU Range Reducer: If you do blocks 256 and threads 256, it won't find the hey key.
+If you use block threads, which the GPU can do, it will find it. Just for your information!
+
 ## How to use
 
 `main.exe 0 29a78213caa9eea824acf08022ab9dfc83414f56` - puzzle 21
