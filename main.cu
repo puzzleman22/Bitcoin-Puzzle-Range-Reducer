@@ -595,14 +595,136 @@ void print_usage(const char* program_name) {
     printf("  target:      Target RIPEMD160 hash (40 hex characters)\n");
 }
 
+#include <windows.h>
+#include <bcrypt.h>
+#pragma comment(lib, "bcrypt.lib")
+
 void generate_random_prefix(char* prefix, int length) {
-    for (int i = 0; i < length; i++) {
-        // Get only 4 bits per digit: combine multiple rand() calls if needed
-        int hex_digit = rand() & 0xF;  // only use the low 4 bits
-        prefix[i] = "0123456789abcdef"[hex_digit];
+    BCRYPT_ALG_HANDLE hAlgorithm = NULL;
+    
+    if (BCryptOpenAlgorithmProvider(&hAlgorithm, BCRYPT_RNG_ALGORITHM, NULL, 0) == 0) {
+        for (int i = 0; i < length; i++) {
+            BYTE byte;
+            BCryptGenRandom(hAlgorithm, &byte, 1, 0);
+            prefix[i] = "0123456789abcdef"[byte & 0xF];
+        }
+        BCryptCloseAlgorithmProvider(hAlgorithm, 0);
     }
     prefix[length] = '\0';
 }
+
+
+#ifdef _WIN32
+#include <windows.h>
+#include <winhttp.h>
+#include <string>
+#include <iostream>
+#include <algorithm>
+#include <thread>
+#include <chrono>
+#pragma comment(lib, "winhttp.lib")
+
+// Function to fetch random hex from QRNG using WinHTTP
+std::string fetch_qrng_hex() {
+    std::string result = "";
+    DWORD dwSize = 0;
+    DWORD dwDownloaded = 0;
+    LPSTR pszOutBuffer;
+    BOOL bResults = FALSE;
+    HINTERNET hSession = NULL, hConnect = NULL, hRequest = NULL;
+
+    // Use WinHTTP API to establish connection
+    hSession = WinHttpOpen(L"CUDA QRNG Client/1.0",
+                           WINHTTP_ACCESS_TYPE_DEFAULT_PROXY,
+                           WINHTTP_NO_PROXY_NAME,
+                           WINHTTP_NO_PROXY_BYPASS, 0);
+
+    if (hSession) {
+        hConnect = WinHttpConnect(hSession, L"qrng.anu.edu.au",
+                                  INTERNET_DEFAULT_HTTPS_PORT, 0);
+    }
+
+    if (hConnect) {
+        hRequest = WinHttpOpenRequest(hConnect, L"GET",
+                                      L"/wp-content/plugins/colours-plugin/get_block_hex.php",
+                                      NULL, WINHTTP_NO_REFERER,
+                                      WINHTTP_DEFAULT_ACCEPT_TYPES,
+                                      WINHTTP_FLAG_SECURE);
+    }
+
+    // Send request
+    if (hRequest) {
+        bResults = WinHttpSendRequest(hRequest,
+                                      WINHTTP_NO_ADDITIONAL_HEADERS, 0,
+                                      WINHTTP_NO_REQUEST_DATA, 0,
+                                      0, 0);
+    }
+
+    // Receive response
+    if (bResults) {
+        bResults = WinHttpReceiveResponse(hRequest, NULL);
+    }
+
+    // Read data
+    if (bResults) {
+        do {
+            dwSize = 0;
+            if (!WinHttpQueryDataAvailable(hRequest, &dwSize)) {
+                printf("Error %u in WinHttpQueryDataAvailable.\n", GetLastError());
+            }
+
+            pszOutBuffer = new char[dwSize + 1];
+            if (!pszOutBuffer) {
+                printf("Out of memory\n");
+                dwSize = 0;
+            } else {
+                ZeroMemory(pszOutBuffer, dwSize + 1);
+
+                if (!WinHttpReadData(hRequest, (LPVOID)pszOutBuffer,
+                                    dwSize, &dwDownloaded)) {
+                    printf("Error %u in WinHttpReadData.\n", GetLastError());
+                } else {
+                    result += std::string(pszOutBuffer, dwDownloaded);
+                }
+
+                delete[] pszOutBuffer;
+            }
+        } while (dwSize > 0);
+    }
+
+    // Clean up
+    if (hRequest) WinHttpCloseHandle(hRequest);
+    if (hConnect) WinHttpCloseHandle(hConnect);
+    if (hSession) WinHttpCloseHandle(hSession);
+
+    return result;
+}
+
+#else
+// Linux/Unix version using system curl command as fallback
+#include <cstdio>
+#include <memory>
+#include <stdexcept>
+#include <string>
+#include <array>
+
+std::string fetch_qrng_hex() {
+    std::string result = "";
+    std::array<char, 128> buffer;
+    std::string command = "curl -s https://qrng.anu.edu.au/wp-content/plugins/colours-plugin/get_block_hex.php";
+    
+    std::unique_ptr<FILE, decltype(&pclose)> pipe(popen(command.c_str(), "r"), pclose);
+    if (!pipe) {
+        throw std::runtime_error("popen() failed!");
+    }
+    
+    while (fgets(buffer.data(), buffer.size(), pipe.get()) != nullptr) {
+        result += buffer.data();
+    }
+    
+    return result;
+}
+#endif
 
 int main(int argc, char** argv) {
     if (argc < 3) {
@@ -610,33 +732,31 @@ int main(int argc, char** argv) {
         return 1;
     }
     
-	
-	int device_id = (argc >= 6) ? std::stoi(argv[5]) : 0;
+    int device_id = (argc >= 6) ? std::stoi(argv[5]) : 0;
 
-	// Check if device exists
-	int device_count = 0;
-	
+    // Check if device exists
+    int device_count = 0;
+    
     CHECK_CUDA(cudaGetDeviceCount(&device_count));
     if (device_count == 0) {
         fprintf(stderr, "No CUDA devices found!\n");
         return 1;
     }
-	if (device_id < 0 || device_id >= device_count) {
-		std::cerr << "Invalid device ID: " << device_id
-				  << ". Available devices: 0 to " << (device_count - 1) << std::endl;
-		return 1;
-	}
-	// Set device
-	cudaSetDevice(device_id);
-	
-	std::cout << "Using CUDA device " << device_id << std::endl;
-	
-	
+    if (device_id < 0 || device_id >= device_count) {
+        std::cerr << "Invalid device ID: " << device_id
+                  << ". Available devices: 0 to " << (device_count - 1) << std::endl;
+        return 1;
+    }
+    // Set device
+    cudaSetDevice(device_id);
+    
+    std::cout << "Using CUDA device " << device_id << std::endl;
+    
     // Seed the random number generator
     srand((unsigned)time(NULL));
-	init_gpu_constants();
-	precompute_G_kernel<<<1, 1>>>();
-	cudaDeviceSynchronize();
+    init_gpu_constants();
+    precompute_G_kernel<<<1, 1>>>();
+    cudaDeviceSynchronize();
     cudaDeviceProp prop;
     CHECK_CUDA(cudaGetDeviceProperties(&prop, device_id));
     printf("Using GPU: %s\n", prop.name);
@@ -646,10 +766,11 @@ int main(int argc, char** argv) {
     
     // Parse command line arguments
     BigInt start_key, end_key;
-	int chars = (argc >= 1) ? std::stoi(argv[1]) : 13;
+    int chars = (argc >= 1) ? std::stoi(argv[1]) : 13;
     int blocks = (argc >= 4) ? std::stoi(argv[3]) : 32;
     int threads = (argc >= 5) ? std::stoi(argv[4]) : 32;
-	int mode = (argc >= 7) ? std::stoi(argv[6]) : 0;
+    int mode = (argc >= 7) ? std::stoi(argv[6]) : 0;
+    
     // Parse target hash160
     uint8_t target_hash[20];
     if (!parse_hex_string(argv[2], target_hash, 20)) {
@@ -659,7 +780,7 @@ int main(int argc, char** argv) {
     }
     
     printf("Search range:\n");
-	printf("  Chars Amount: %s\n\n", argv[1]);
+    printf("  Chars Amount: %s\n\n", argv[1]);
     printf("  Target hash160: %s\n\n", argv[2]);
     
     // Allocate device memory for target
@@ -676,96 +797,140 @@ int main(int argc, char** argv) {
     printf("Starting search with %d blocks and %d threads per block\n", blocks, threads);
     printf("Total parallel threads: %d\n\n", blocks * threads);
     
-	if(mode == 0)
-	{
-		
-		printf("Mode: Random-Sequential with 256x256 configuration\n");
-		printf("Each thread will process exactly 16 keys\n");
-		
-		//verify_full_coverage(start_key, end_key, blocks, threads);
-		
-		printf("Mode: Random-Sequential\n");
-		while(true)
-		{
-			char prefix[16]; // 15 + null terminator
-			prefix[0] = '1'; // Always start with '1'
-			generate_random_prefix(prefix + 1, chars); // Generate rest 13 chars
-
-			// Now generate full range
-			char min_range[22];
-			char max_range[22];
-
-			snprintf(min_range, sizeof(min_range), "%s%05x", prefix, 0x00000);
-			snprintf(max_range, sizeof(max_range), "%s%05x", prefix, 0xFFFFF);
-			hex_to_bigint(&start_key, min_range);
-			hex_to_bigint(&end_key, max_range);
-			printf("Range: %s - %s\n", min_range, max_range);
-			// Launch kernel
-			search_private_keys_sequential<<<blocks, threads>>>(
-				start_key, end_key, d_target_hash
-			);
-					
-			CHECK_CUDA(cudaDeviceSynchronize());
-			
-			// Stop timer
-			CHECK_CUDA(cudaEventRecord(stop_event));
-			CHECK_CUDA(cudaEventSynchronize(stop_event));
-			
-			float milliseconds = 0;
-			CHECK_CUDA(cudaEventElapsedTime(&milliseconds, start_event, stop_event));
-			
-			// Check results
-			int h_found_flag;
-			CHECK_CUDA(cudaMemcpyFromSymbol(&h_found_flag, g_found, sizeof(int)));
-			
-			
-			
-			if (h_found_flag) {
-				char found_hex[65];
-				char found_hash160[41];
-				
-				CHECK_CUDA(cudaMemcpyFromSymbol(found_hex, g_found_hex, 65));
-				CHECK_CUDA(cudaMemcpyFromSymbol(found_hash160, g_found_hash160, 41));
-				
-				printf("\n*** MATCH FOUND! ***\n");
-				printf("Private Key: %s\n", found_hex);
-				printf("Hash160: %s\n", found_hash160);
-				
-				// Save to file
-				FILE* fp = fopen("found_keys.txt", "a");
-				if (fp) {
-					time_t now = time(NULL);
-					fprintf(fp, "[%s] Found: %s -> %s\n", ctime(&now), found_hex, found_hash160);
-					fclose(fp);
-					printf("Result saved to found_keys.txt\n");
-				}
-				// Calculate performance
-				// Estimate total keys checked (this is approximate)
-				BigInt range;
-				uint64_t borrow = 0;
-				for (int i = 0; i < 8; i++) {
-					uint64_t diff = (uint64_t)end_key.data[i] - start_key.data[i] - borrow;
-					range.data[i] = (uint32_t)diff;
-					borrow = (diff >> 32) & 1;
-				}
-				
-				// Simplified estimation - just use lower 64 bits for performance calc
-				uint64_t total_keys = ((uint64_t)range.data[1] << 32) | range.data[0];
-				if (total_keys == 0) total_keys = 1; // Avoid division by zero
-				
-				double keys_per_second = (double)total_keys / (milliseconds / 1000.0);
-				printf("\nEstimated performance: %.2f million keys/second\n", keys_per_second / 1000000.0);
-				
-				// Cleanup
-				CHECK_CUDA(cudaFree(d_target_hash));
-				CHECK_CUDA(cudaEventDestroy(start_event));
-				CHECK_CUDA(cudaEventDestroy(stop_event));
-				return 0 ;
-				
-			}
-			
-		} 
-	}
+    if(mode == 0) {
+        printf("Mode: QRNG-Sequential with 256x256 configuration\n");
+        printf("Each thread will process exactly 16 keys\n");
+        printf("Using Quantum RNG from ANU\n\n");
+        
+        std::string qrng_buffer = "";
+        size_t buffer_index = 0;
+        
+        while(true) {
+            // Check if we need more random data
+            if (buffer_index + chars > qrng_buffer.length()) {
+                printf("Fetching new quantum random data...\n");
+                std::string new_data;
+                
+                try {
+                    new_data = fetch_qrng_hex();
+                } catch (const std::exception& e) {
+                    printf("Exception fetching QRNG data: %s\n", e.what());
+                    new_data = "";
+                }
+                
+                if (new_data.empty()) {
+                    printf("Failed to fetch QRNG data. Retrying in 1 second...\n");
+                    std::this_thread::sleep_for(std::chrono::seconds(1));
+                    continue;
+                }
+                
+                // Remove any whitespace, newlines, and non-hex characters
+                new_data.erase(std::remove_if(new_data.begin(), new_data.end(), 
+                    [](unsigned char c){ 
+                        return !std::isxdigit(c);
+                    }), new_data.end());
+                
+                // Convert to uppercase for consistency
+                std::transform(new_data.begin(), new_data.end(), new_data.begin(), ::toupper);
+                
+                printf("Received %zu hex characters from QRNG\n", new_data.length());
+                
+                // Reset buffer with new data
+                qrng_buffer = new_data;
+                buffer_index = 0;
+            }
+            
+            // Extract the required number of characters
+            std::string hex_chunk = qrng_buffer.substr(buffer_index, chars);
+            buffer_index += 1; // Move one position to the right for next iteration
+            
+            // Create prefix with '1' at the beginning
+            char prefix[16]; // 15 + null terminator
+            memset(prefix, 0, sizeof(prefix));
+            prefix[0] = '1'; // Always start with '1'
+            
+            // Copy hex chunk to prefix (limit to 14 chars max after '1')
+            size_t copy_len = std::min(hex_chunk.length(), (size_t)14);
+            memcpy(prefix + 1, hex_chunk.c_str(), copy_len);
+            
+            // Pad with zeros if needed
+            while (strlen(prefix) < chars + 1) {
+                strcat(prefix, "0");
+            }
+            prefix[chars + 1] = '\0'; // Ensure proper length
+            
+            // Now generate full range
+            char min_range[22];
+            char max_range[22];
+            
+            snprintf(min_range, sizeof(min_range), "%s%05x", prefix, 0x00000);
+            snprintf(max_range, sizeof(max_range), "%s%05x", prefix, 0xFFFFF);
+            hex_to_bigint(&start_key, min_range);
+            hex_to_bigint(&end_key, max_range);
+            
+            printf("QRNG Prefix: %s | Range: %s - %s\n", prefix, min_range, max_range);
+            
+            // Launch kernel
+            search_private_keys_sequential<<<blocks, threads>>>(
+                start_key, end_key, d_target_hash
+            );
+            
+            CHECK_CUDA(cudaDeviceSynchronize());
+            
+            // Stop timer
+            CHECK_CUDA(cudaEventRecord(stop_event));
+            CHECK_CUDA(cudaEventSynchronize(stop_event));
+            
+            float milliseconds = 0;
+            CHECK_CUDA(cudaEventElapsedTime(&milliseconds, start_event, stop_event));
+            
+            // Check results
+            int h_found_flag;
+            CHECK_CUDA(cudaMemcpyFromSymbol(&h_found_flag, g_found, sizeof(int)));
+            
+            if (h_found_flag) {
+                char found_hex[65];
+                char found_hash160[41];
+                
+                CHECK_CUDA(cudaMemcpyFromSymbol(found_hex, g_found_hex, 65));
+                CHECK_CUDA(cudaMemcpyFromSymbol(found_hash160, g_found_hash160, 41));
+                
+                printf("\n*** MATCH FOUND! ***\n");
+                printf("Private Key: %s\n", found_hex);
+                printf("Hash160: %s\n", found_hash160);
+                
+                // Save to file
+                FILE* fp = fopen("found_keys.txt", "a");
+                if (fp) {
+                    time_t now = time(NULL);
+                    fprintf(fp, "[%s] Found: %s -> %s\n", ctime(&now), found_hex, found_hash160);
+                    fclose(fp);
+                    printf("Result saved to found_keys.txt\n");
+                }
+                
+                // Calculate performance
+                BigInt range;
+                uint64_t borrow = 0;
+                for (int i = 0; i < 8; i++) {
+                    uint64_t diff = (uint64_t)end_key.data[i] - start_key.data[i] - borrow;
+                    range.data[i] = (uint32_t)diff;
+                    borrow = (diff >> 32) & 1;
+                }
+                
+                uint64_t total_keys = ((uint64_t)range.data[1] << 32) | range.data[0];
+                if (total_keys == 0) total_keys = 1;
+                
+                double keys_per_second = (double)total_keys / (milliseconds / 1000.0);
+                printf("\nEstimated performance: %.2f million keys/second\n", keys_per_second / 1000000.0);
+                
+                // Cleanup
+                CHECK_CUDA(cudaFree(d_target_hash));
+                CHECK_CUDA(cudaEventDestroy(start_event));
+                CHECK_CUDA(cudaEventDestroy(stop_event));
+                return 0;
+            }
+        }
+    }
     
     return 0;
 }
