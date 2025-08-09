@@ -317,36 +317,45 @@ __device__ void hash160_to_hex(uint8_t* hash, char* hex_str) {
     hex_str[40] = '\0';
 }
 
-// Sequential search kernel for the given range
+// Sequential search kernel with guaranteed complete coverage for 256x256 configuration
 __global__ void search_private_keys_sequential(
     BigInt start_key,
     BigInt end_key,
     uint8_t* target_hash
 ) {
     int tid = blockIdx.x * blockDim.x + threadIdx.x;
-    int total_threads = gridDim.x * blockDim.x;
+    int total_threads = gridDim.x * blockDim.x; // 256 * 256 = 65,536
     
-    // Calculate range per thread
-    uint64_t borrow = 0;
-    for (int i = 0; i < 8; i++) {
-        uint64_t diff = (uint64_t)end_key.data[i] - start_key.data[i] - borrow;
-        borrow = (diff >> 32) & 1;
+    // For 5 hex chars: 0x00000 to 0xFFFFF = 1,048,576 keys total
+    const uint64_t total_keys = 0x100000; // 1,048,576
+    const uint64_t keys_per_thread_base = total_keys / total_threads; // 16 keys per thread
+    const uint64_t remainder = total_keys % total_threads; // 0 in this case
+    
+    // Calculate how many keys this thread should process
+    uint64_t keys_for_this_thread;
+    uint64_t start_offset;
+    
+    if (tid < remainder) {
+        // Threads that need to process one extra key
+        keys_for_this_thread = keys_per_thread_base + 1;
+        start_offset = tid * keys_for_this_thread;
+    } else {
+        // Regular threads
+        keys_for_this_thread = keys_per_thread_base;
+        start_offset = remainder * (keys_per_thread_base + 1) + 
+                      (tid - remainder) * keys_per_thread_base;
     }
     
-    // Each thread starts at a different offset
+    // Calculate this thread's starting key
     BigInt current_key;
     copy_bigint(&current_key, &start_key);
     
-    // Add thread offset
-    BigInt thread_offset;
-    init_bigint(&thread_offset, tid);
-    ptx_u256Add(&current_key, &current_key, &thread_offset);
+    // Add the start offset to get this thread's first key
+    BigInt offset;
+    init_bigint(&offset, start_offset);
+    ptx_u256Add(&current_key, &current_key, &offset);
     
-    // Calculate stride
-    BigInt stride;
-    init_bigint(&stride, total_threads);
-    
-    // Pre-allocate working variables
+    // Pre-allocate working variables for performance
     ECPointJac result_jac;
     ECPoint public_key;
     uint8_t pubkey[33];
@@ -354,95 +363,160 @@ __global__ void search_private_keys_sequential(
     char hash160_str[41];
     char priv_key_hex[65];
     
-    int iteration = 0;
+    // Increment value (1) for moving to next key
+    BigInt one;
+    init_bigint(&one, 1);
     
-    while (compare_bigint(&current_key, &end_key) <= 0 && g_found == 0) {
-        // Check private key
+    
+    // Process exactly keys_for_this_thread keys
+    for (uint64_t i = 0; i < keys_for_this_thread; i++) {
+        // Early exit if another thread found the target
+        if (g_found != 0) {
+            return;
+        }
+        
+        // Safety check: don't go beyond end_key
+        if (compare_bigint(&current_key, &end_key) > 0) {
+            // This shouldn't happen with correct range, but safety first
+            if (tid == 0) {
+                printf("Warning: Thread %d exceeded range at iteration %llu\n", tid, i);
+            }
+            return;
+        }
+        
+        // Generate public key from private key
         scalar_multiply_jac_device(&result_jac, &const_G_jacobian, &current_key);
         jacobian_to_affine(&public_key, &result_jac);
+        
+        // Convert to compressed public key format
         coords_to_compressed_pubkey(public_key.x, public_key.y, pubkey);
+        
+        // Calculate RIPEMD160(SHA256(pubkey))
         hash160(pubkey, 33, hash160_out);
         
-        // Debug output for first thread every N iterations
-       // if (tid == 0 && iteration % CHECK_INTERVAL == 0) {
-        //    bigint_to_hex(&current_key, priv_key_hex);
-        //    hash160_to_hex(hash160_out, hash160_str);
-            //printf("Thread 0 checking: %s -> %s\n", priv_key_hex, hash160_str);
-        //}
         
         // Check if we found the target
         if (compare_hash160_fast(hash160_out, target_hash)) {
+            // Use atomic CAS to ensure only one thread reports the finding
             if (atomicCAS((int*)&g_found, 0, 1) == 0) {
+                // This thread won the race to report
                 bigint_to_hex(&current_key, priv_key_hex);
                 hash160_to_hex(hash160_out, hash160_str);
                 
+                // Copy to global memory for host to retrieve
                 memcpy(g_found_hex, priv_key_hex, 65);
                 memcpy(g_found_hash160, hash160_str, 41);
                 
-                printf("\n*** FOUND! ***\n");
+                printf("\n*** FOUND BY THREAD %d! ***\n", tid);
                 printf("Private Key: %s\n", priv_key_hex);
                 printf("Hash160: %s\n", hash160_str);
-                return;
+                printf("Found at iteration %llu of %llu\n", i, keys_for_this_thread);
             }
+            return;
         }
         
-        // Move to next key
-        ptx_u256Add(&current_key, &current_key, &stride);
-        iteration++;
+        // Move to the next key
+        ptx_u256Add(&current_key, &current_key, &one);
+    }
+    
+}
+
+// Optional: Verification kernel to ensure no keys are skipped
+__global__ void verify_coverage(
+    BigInt start_key,
+    BigInt end_key,
+    uint8_t* coverage_map
+) {
+    int tid = blockIdx.x * blockDim.x + threadIdx.x;
+    int total_threads = gridDim.x * blockDim.x;
+    
+    const uint64_t total_keys = 0x100000;
+    const uint64_t keys_per_thread_base = total_keys / total_threads;
+    const uint64_t remainder = total_keys % total_threads;
+    
+    uint64_t keys_for_this_thread;
+    uint64_t start_offset;
+    
+    if (tid < remainder) {
+        keys_for_this_thread = keys_per_thread_base + 1;
+        start_offset = tid * keys_for_this_thread;
+    } else {
+        keys_for_this_thread = keys_per_thread_base;
+        start_offset = remainder * (keys_per_thread_base + 1) + 
+                      (tid - remainder) * keys_per_thread_base;
+    }
+    
+    // Mark all keys this thread would process
+    for (uint64_t i = 0; i < keys_for_this_thread; i++) {
+        uint64_t key_index = start_offset + i;
+        if (key_index < total_keys) {
+            coverage_map[key_index] = 1;
+        }
     }
 }
 
-// Host-side functions
-void init_secp256k1_constants() {
-    BigInt h_p, h_n;
-    ECPointJac h_G_jac;
+// Host function to verify coverage (call this in debug mode)
+void verify_full_coverage(BigInt start_key, BigInt end_key, int blocks, int threads) {
+    const size_t total_keys = 0x100000;
+    uint8_t* d_coverage;
+    uint8_t* h_coverage = new uint8_t[total_keys];
     
-    // p = 2^256 - 2^32 - 977
-    memset(&h_p, 0, sizeof(BigInt));
-    h_p.data[7] = 0xFFFFFFFF;
-    h_p.data[6] = 0xFFFFFFFF;
-    h_p.data[5] = 0xFFFFFFFF;
-    h_p.data[4] = 0xFFFFFFFF;
-    h_p.data[3] = 0xFFFFFFFF;
-    h_p.data[2] = 0xFFFFFFFF;
-    h_p.data[1] = 0xFFFFFFFE;
-    h_p.data[0] = 0xFFFFFC2F;
+    // Allocate and initialize coverage map
+    cudaMalloc(&d_coverage, total_keys * sizeof(uint8_t));
+    cudaMemset(d_coverage, 0, total_keys * sizeof(uint8_t));
     
-    // n = order of G
-    h_n.data[7] = 0xFFFFFFFF;
-    h_n.data[6] = 0xFFFFFFFF;
-    h_n.data[5] = 0xFFFFFFFF;
-    h_n.data[4] = 0xFFFFFFFE;
-    h_n.data[3] = 0xBAAEDCE6;
-    h_n.data[2] = 0xAF48A03B;
-    h_n.data[1] = 0xBFD25E8C;
-    h_n.data[0] = 0xD0364141;
+    // Run verification kernel
+    verify_coverage<<<blocks, threads>>>(start_key, end_key, d_coverage);
+    cudaDeviceSynchronize();
     
-    // G = generator point in Jacobian coordinates
-    h_G_jac.X.data[7] = 0x79BE667E;
-    h_G_jac.X.data[6] = 0xF9DCBBAC;
-    h_G_jac.X.data[5] = 0x55A06295;
-    h_G_jac.X.data[4] = 0xCE870B07;
-    h_G_jac.X.data[3] = 0x029BFCDB;
-    h_G_jac.X.data[2] = 0x2DCE28D9;
-    h_G_jac.X.data[1] = 0x59F2815B;
-    h_G_jac.X.data[0] = 0x16F81798;
+    // Copy back and check
+    cudaMemcpy(h_coverage, d_coverage, total_keys * sizeof(uint8_t), cudaMemcpyDeviceToHost);
     
-    h_G_jac.Y.data[7] = 0x483ADA77;
-    h_G_jac.Y.data[6] = 0x26A3C465;
-    h_G_jac.Y.data[5] = 0x5DA4FBFC;
-    h_G_jac.Y.data[4] = 0x0E1108A8;
-    h_G_jac.Y.data[3] = 0xFD17B448;
-    h_G_jac.Y.data[2] = 0xA6855419;
-    h_G_jac.Y.data[1] = 0x9C47D08F;
-    h_G_jac.Y.data[0] = 0xFB10D4B8;
+    int missing_count = 0;
+    for (size_t i = 0; i < total_keys; i++) {
+        if (h_coverage[i] == 0) {
+            if (missing_count < 10) { // Only print first 10 missing keys
+                printf("Missing key at index: 0x%05lx\n", i);
+            }
+            missing_count++;
+        }
+    }
     
-    init_bigint(&h_G_jac.Z, 1);
-    h_G_jac.infinity = false;
+    if (missing_count == 0) {
+        printf("✓ Coverage verification passed! All %zu keys will be checked.\n", total_keys);
+    } else {
+        printf("✗ Coverage verification failed! %d keys would be skipped.\n", missing_count);
+    }
     
-    CHECK_CUDA(cudaMemcpyToSymbol(const_p, &h_p, sizeof(BigInt)));
-    CHECK_CUDA(cudaMemcpyToSymbol(const_n, &h_n, sizeof(BigInt)));
-    CHECK_CUDA(cudaMemcpyToSymbol(const_G_jacobian, &h_G_jac, sizeof(ECPointJac)));
+    // Cleanup
+    cudaFree(d_coverage);
+    delete[] h_coverage;
+}
+
+void init_gpu_constants() {
+    // 1) 定义 p_host
+    const BigInt p_host = {
+        { 0xFFFFFC2F, 0xFFFFFFFE, 0xFFFFFFFF, 0xFFFFFFFF,
+          0xFFFFFFFF, 0xFFFFFFFF, 0xFFFFFFFF, 0xFFFFFFFF }
+    };
+    // 2) 定义 G_jacobian_host
+    const ECPointJac G_jacobian_host = {
+        {{ 0x16F81798, 0x59F2815B, 0x2DCE28D9, 0x029BFCDB,
+                0xCE870B07, 0x55A06295, 0xF9DCBBAC, 0x79BE667E }},
+        {{ 0xFB10D4B8, 0x9C47D08F, 0xA6855419, 0xFD17B448,
+                0x0E1108A8, 0x5DA4FBFC, 0x26A3C465, 0x483ADA77 }},
+        {{ 1, 0, 0, 0, 0, 0, 0, 0 }}
+    };
+    // 3) 定义 n_host
+    const BigInt n_host = {
+        { 0xD0364141, 0xBFD25E8C, 0xAF48A03B, 0xBAAEDCE6,
+          0xFFFFFFFE, 0xFFFFFFFF, 0xFFFFFFFF, 0xFFFFFFFF }
+    };
+
+    // 然后再复制到 __constant__ 内存
+    CHECK_CUDA(cudaMemcpyToSymbol(const_p, &p_host, sizeof(BigInt)));
+    CHECK_CUDA(cudaMemcpyToSymbol(const_G_jacobian, &G_jacobian_host, sizeof(ECPointJac)));
+    CHECK_CUDA(cudaMemcpyToSymbol(const_n, &n_host, sizeof(BigInt)));
 }
 
 void hex_to_bigint(BigInt* num, const char* hex) {
@@ -554,22 +628,21 @@ int main(int argc, char** argv) {
 	}
 	// Set device
 	cudaSetDevice(device_id);
-
+	
 	std::cout << "Using CUDA device " << device_id << std::endl;
 	
 	
     // Seed the random number generator
     srand((unsigned)time(NULL));
-
+	init_gpu_constants();
+	precompute_G_kernel<<<1, 1>>>();
+	cudaDeviceSynchronize();
     cudaDeviceProp prop;
     CHECK_CUDA(cudaGetDeviceProperties(&prop, device_id));
     printf("Using GPU: %s\n", prop.name);
     printf("Compute capability: %d.%d\n", prop.major, prop.minor);
     printf("Multiprocessors: %d\n", prop.multiProcessorCount);
     printf("\n");
-    
-    // Initialize secp256k1 constants
-    init_secp256k1_constants();
     
     // Parse command line arguments
     BigInt start_key, end_key;
@@ -605,6 +678,12 @@ int main(int argc, char** argv) {
     
 	if(mode == 0)
 	{
+		
+		printf("Mode: Random-Sequential with 256x256 configuration\n");
+		printf("Each thread will process exactly 16 keys\n");
+		
+		//verify_full_coverage(start_key, end_key, blocks, threads);
+		
 		printf("Mode: Random-Sequential\n");
 		while(true)
 		{
